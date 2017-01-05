@@ -389,12 +389,12 @@ let populate_api_keys ({ addr_str; w; to_bitmex_r; to_bitmex_w; to_client_r; to_
                          key; secret; apikeys; usernames; accounts; need_resubscribe } as c) =
   let rec inner_exn entries =
     Log.debug log_bitmex "[%s] Found %d api keys entries" addr_str @@ List.length entries;
-    let old_apikeys = Int.Set.of_hashtbl_keys apikeys in
+    let old_apikeys = Int.Set.of_list @@ Int.Table.keys apikeys in
     Int.Table.clear apikeys;
     Int.Table.clear usernames;
     String.Table.clear accounts;
     List.iter entries ~f:(add_api_keys c);
-    let new_apikeys = Int.Set.of_hashtbl_keys apikeys in
+    let new_apikeys = Int.Set.of_list @@ Int.Table.keys apikeys in
     if not @@ Int.Set.equal old_apikeys new_apikeys then write_trade_accounts c w;
     let keys_to_delete = if need_resubscribe then Int.Set.empty else Int.Set.diff old_apikeys new_apikeys in
     let keys_to_add = if need_resubscribe then new_apikeys else Int.Set.diff new_apikeys old_apikeys in
@@ -417,8 +417,9 @@ let populate_api_keys ({ addr_str; w; to_bitmex_r; to_bitmex_w; to_client_r; to_
     c.need_resubscribe <- false
   in
   let inner entries = Monitor.try_with_or_error (fun () -> inner_exn entries) in
-  Rest.ApiKey.dtc ~log:log_bitmex ~key ~secret ~testnet:!use_testnet () |>
-  Deferred.Or_error.bind ~f:inner
+  Deferred.Or_error.bind
+    (Rest.ApiKey.dtc ~log:log_bitmex ~key ~secret ~testnet:!use_testnet ())
+  inner
 
 let with_userid
     ({ addr; addr_str; w; ws_r; ws_w; key; secret; position; margin; order;
@@ -682,7 +683,7 @@ let process addr w msg_cs scratchbuf =
         SecurityDefinition.Response.to_cstruct secdef_resp_cs { secdef with final = true; request_id = 110_000_000l };
         Writer.write_cstruct w secdef_resp_cs
       in
-      if send_secdefs then ignore @@ String.Table.iter instruments ~f:on_instrument
+      if send_secdefs then ignore @@ String.Table.iter_vals instruments ~f:on_instrument
     in
     let client = create_client m.username m.general_text_data in
     String.Table.set clients ~key:addr_str ~data:client;
@@ -1469,7 +1470,7 @@ let insert_instr buf_cs instrObj =
       Writer.write_cstruct w buf_cs
     end
   in
-  String.Table.iter clients ~f:on_client
+  String.Table.iter_vals clients ~f:on_client
 
 let update_instr buf_cs instrObj =
   let instrObj = RespObj.of_json instrObj in
@@ -1488,7 +1489,7 @@ let update_instr buf_cs instrObj =
       in
       Option.iter String.Table.(find subs symbol) ~f:on_symbol_id
     in
-    String.Table.iter clients ~f:on_client
+    String.Table.iter_vals clients ~f:on_client
 
 let update_depths update_cs action { OrderBook.L2.symbol; id; side; size; price } =
   (* find_exn cannot raise here *)
@@ -1529,7 +1530,7 @@ let update_depths update_cs action { OrderBook.L2.symbol; id; side; size; price 
       in
       Option.iter String.Table.(find subs_depth symbol) ~f:on_symbol_id
     in
-    String.Table.iter clients ~f:on_client
+    String.Table.iter_vals clients ~f:on_client
   | _ ->
     Log.info log_bitmex "update_depth: received update before snapshot, ignoring"
 
@@ -1560,7 +1561,7 @@ let update_quote update_cs q =
     | Some id, None -> on_symbol_id id
     | _ -> ()
   in
-  String.Table.iter clients ~f:on_client
+  String.Table.iter_vals clients ~f:on_client
 
 let update_trade cs { Trade.symbol; timestamp; price; size; side; tickDirection; trdMatchID;
                       grossValue; homeNotional; foreignNotional; id } =
@@ -1589,7 +1590,7 @@ let update_trade cs { Trade.symbol; timestamp; price; size; side; tickDirection;
       in
       Option.iter String.Table.(find subs symbol) ~f:on_symbol_id
     in
-    String.Table.iter clients ~f:on_client
+    String.Table.iter_vals clients ~f:on_client
 
 let bitmex_ws ~instrs_initialized ~orderbook_initialized ~quotes_initialized =
   let open Ws in
@@ -1683,9 +1684,11 @@ let bitmex_ws ~instrs_initialized ~orderbook_initialized ~quotes_initialized =
     Pipe.write to_ws_w @@ MD.to_yojson @@ MD.unsubscribe ~id ~topic
   in
   let connected = Mvar.create () in
+  let connected_ro = Mvar.read_only connected in
   let rec resubscribe () =
-    Mvar.take (Mvar.read_only connected) >>= fun () ->
-    String.Table.iter clients ~f:(fun c -> c.need_resubscribe <- true);
+    Mvar.value_available connected_ro >>= fun () ->
+    let _ = Mvar.take connected_ro in
+    String.Table.iter_vals clients ~f:(fun c -> c.need_resubscribe <- true);
     Pipe.write to_ws_w @@ MD.to_yojson @@ MD.subscribe ~id:my_uuid ~topic:"" >>= fun () ->
     resubscribe ()
   in
